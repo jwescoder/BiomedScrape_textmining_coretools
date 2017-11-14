@@ -1,0 +1,129 @@
+import gensim
+from gensim import corpora, models, similarities
+from nltk.corpus import stopwords
+from bs4 import BeautifulSoup
+import urllib.request
+import time
+import simplejson
+from collections import Counter
+import nltk, string
+from nltk import FreqDist
+#from sklearn.feature_extraction.text import TfidfVectorizer  #alternate trainable TF-IDF model from scikit-learn module if not using gensim
+stemmer = nltk.stem.porter.PorterStemmer() #stemming, lowercasing, depunctuation of the documents
+remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
+def stem_tokens(tokens):
+    return [stemmer.stem(item) for item in tokens]
+def normalize(text):
+    return stem_tokens(nltk.word_tokenize(text.lower().translate(remove_punctuation_map)))
+print("This program will perform a TF-IDF weighted, LSA-enhanced cosine similarity comparison of the assembled NLM abstract documents for any number of drugs you input, relative to a query document corresponding to assembled abstracts related to a disease of interest, e.g. Duchenne muscular dystrophy, over a specified date range in years that you select. The result will provide a reliable quantitative estimate of relative overlap between your disease query and drugs pertinent to it over a specified period, including overlap of deep semantic structures (DSS's) beyond direct term agreement per se. ")
+disease = input("What disease do you want to study?")
+diseaseyear1 = input("Choose a start year to scrape disease abstracts ")
+diseaseyear2 = input("Choose an end year to scrape disease abstracts ")
+diseasetermq = input("Do you want to enter any additional search terms (non-MeSH) to your disease query? Two or more terms will be queried as an OR search, e.g. entering \"cell membrane, sarcolemma\" will be queried as \"(cell membrane OR sarcolemma)\".  (y/n)")
+if diseasetermq == 'y': #This version of the code allows for inclusion of unlimited additional search terms and a single MeSH term (part of an early study we were conducting on comprehensive quantitative abstract document comparisons)
+    disease += ' AND ('    
+    diseaseaddl = input("Enter any additional non-MeSH terms to query alongside the disease of interest, separated by commas. ")
+    diseaseaddlspaced = ' OR '.join(diseaseaddl.split(", "))
+    diseaseaddlspaced += ' )'
+    disease = ' '.join([disease, diseaseaddlspaced])
+diseasemeshq =  input("Do you want to enter an additional MeSH term to query alongside the disease of interest? (y/n) " )
+if diseasemeshq == 'y':
+    disease += ' AND' 
+    diseasemeshterm = input("Enter a MeSH term, as a single word, to query alongside the disease of interest. " )
+    diseasemeshterm += '[mesh]'
+    disease = ' '.join([disease, diseasemeshterm])
+disease = disease.replace('( ','(').replace(' )', ')')
+diseaseurlinsert = '+'.join(disease.split())
+print(diseaseurlinsert)
+x = input("Enter a sequence of drugs that you want to compare, separated by commas. ")
+year1 = input("Choose a start year to scrape drug abstracts ")
+year2 = input("Choose  an end year to scrape drug abstracts ")
+drugtermq = input("Do you want to enter any additional search terms (non-MeSH) to your drugs query? Two or more terms will be queried as an OR search, e.g. entering \"cell membrane, sarcolemma\" will be queried as \"(cell membrane OR sarcolemma)\".  (y/n)")
+if drugtermq == 'y':
+    drugaddl = input("Enter any additional non-MeSH terms to query alongside the drugs of interest, separated by commas.")
+drugmeshq =  input("Do you want to enter an additional MeSH term to query alongside the drugs of interest? (y/n) " )
+if drugmeshq == 'y':
+    drugmeshterm = input("Enter a MeSH term, as a single word, to query alongside the disease of interest. " )
+druglist = x.split(", ")
+numdrug = len(druglist)
+drug = dict()
+drugwdsurlinsert = dict() #iterate through the drugs input by user to obtain URL for eutils (see below)
+for i in range(0, numdrug): #string editing to create the insert for the esearch URL accessing NLM eutils API
+   drug[i] = druglist[i]
+   if drugtermq == 'y':
+       drug[i] += ' AND ('    
+       drugaddlspaced = ' OR '.join(drugaddl.split(", "))
+       drugaddlspaced += ' )'
+       drug[i] = ' '.join([drug[i], drugaddlspaced])
+   if drugmeshq == 'y':
+       drug[i] += ' AND' 
+       drugmeshterm += '[mesh]'
+       drug[i] = ' '.join([drug[i], drugmeshterm])
+   drug[i] = drug[i].replace('( ','(').replace(' )', ')')
+   drugwdsurlinsert[i] = '+'.join(drug[i].split())
+stoplist = set(stopwords.words('english'))
+abstractdisease = urllib.request.urlopen('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=' + diseaseurlinsert + '&mindate=' + diseaseyear1 + '&maxdate=' + diseaseyear2 + '&retmax=100000&datetype=pdat&usehistory=y').read()  #interface with the NLM eutils APIl the usehistory term creates the webenv variable
+#time.sleep(3)   #optional pause step, empirically seems to help for secure socket issues that crop up for some wi-fi connections
+soupdisease = BeautifulSoup(abstractdisease, "lxml") #designates preferred lxml parser for XML-based results of esearch
+for w in soupdisease.find_all("webenv"): 
+    webenvtextdisease = w.get_text()  #gets the critical environmnetal variable for the subsequent efetch operation
+webenvdiseasestring = str(webenvtextdisease)
+diseasexml = urllib.request.urlopen('http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&query_key=1&webenv=' + webenvdiseasestring + '&retmode=xml&rettype=abstract').read()
+diseasexmlsoup = BeautifulSoup(diseasexml, "lxml")
+cpinfoout = diseasexmlsoup.findAll(lambda tag:tag.name == 'copyrightinformation' ) #splits the parse tree to remove this tag which is often internal to the <abastract> tag delimiter, ensuring only abstract text is scraped; the BeautifulSoup decompose method can also be used for this
+cpinfotree = [cp.extract() for cp in cpinfoout]    
+for tag in diseasexmlsoup.findAll(True): #removes tags internal to the <abstract> tag delimiter, crucial esp. for handling structured abstracts
+    if tag.name == 'abstracttext':
+        tag.hidden = True
+abstractsdisease = (diseasexmlsoup.find_all('abstract'))
+abstractsdisease = str(abstractsdisease)
+abstractsdisease = abstractsdisease.replace('\n', '')
+abstractsdiseaseremovetags = abstractsdisease.replace('[<abstract>','').replace('</abstract>]','').replace('</abstract>, <abstract>', '')
+normalized_disease = normalize(abstractsdiseaseremovetags)
+filtered_disease = [word for word in normalized_disease if word not in stoplist] #use list comprehension to stopword the tokenized query text
+#print(Counter(filtered_disease).most_common(100))  #optional QC step to ensure proper tokenization for any modifications to core code
+#for i in range(0, numdrug):  #optional QC loop to proof drug URK's for esearch
+#    print (drug[i])
+#    abstracturl = ('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=' + drugwdsurlinsert[i] + '&mindate=' + year1 + '&maxdate=' + year2 + '&retmax=100000&datetype=pdat&usehistory=y')
+#    print(abstracturl)
+filtered_abstract = dict()
+for i in range(0, numdrug): #iterate through all user input drugs, scrape exclusively abstract text, then stem/lowercase/depunctuate/stopword
+    abstractlist = urllib.request.urlopen('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=' + drugwdsurlinsert[i] + '&mindate=' + year1 + '&maxdate=' + year2 + '&retmax=100000&datetype=pdat&usehistory=y').read()
+    soup = BeautifulSoup(abstractlist, "lxml") 
+    for w in soup.find_all("webenv"): 
+        webenvtext = w.get_text()
+    webenvstring = str(webenvtext)
+    abstractxml = urllib.request.urlopen('http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&query_key=1&webenv=' + webenvstring + '&retmode=xml&rettype=abstract')
+    abstractxmlsoup = BeautifulSoup(abstractxml, "lxml")
+    cpinfoout = abstractxmlsoup.findAll(lambda tag:tag.name == 'copyrightinformation' )
+    cpinfotree = [cp.extract() for cp in cpinfoout]    
+    for tag in abstractxmlsoup.findAll(True):
+        if tag.name == 'abstracttext':
+            tag.hidden = True
+    abstracts = (abstractxmlsoup.find_all('abstract'))
+    abstracts = str(abstracts)
+    abstracts = abstracts.replace('\n', '')
+    abstractsremovetags = abstracts.replace('[<abstract>','').replace('</abstract>]','').replace('</abstract>, <abstract>', '')
+    normalized_abstracts = normalize(abstractsremovetags)
+    filtered_abstract[i] = [word for word in normalized_abstracts if word not in stoplist]
+abstractdicttolist = filtered_abstract.values() #convert dict to nested list of tokens, each internal list corresponding to assembled abstracts from one of the drugs
+dictionary_abstracts = corpora.Dictionary(abstractdicttolist) #gensim module method to create integer for each term in the nested list of tokens for the drugs being compared. The same dictionary -- token to integer mapping -- must be used for all subsequent steps!
+with open('C:\\Users\\Wescom~1\\Pythontestsaveddocs\\year\\abstokens\\1911.txt') as f: corp1911 = simplejson.load(f) #this version just uses neutral pertinent corpora--total abstracts scraped from a given time interval from NLM Pubmed--loaded locally from disk to train the gensim LSA model below
+with open('C:\\Users\\Wescom~1\\Pythontestsaveddocs\\year\\abstokens\\1950.txt') as f: corp1950 = simplejson.load(f)
+with open('C:\\Users\\Wescom~1\\Pythontestsaveddocs\\year\\abstokens\\1970.txt') as f: corp1970 = simplejson.load(f)
+with open('C:\\Users\\Wescom~1\\Pythontestsaveddocs\\year\\abstokens\\1980.txt') as f: corp1980 = simplejson.load(f)
+with open('C:\\Users\\Wescom~1\\Pythontestsaveddocs\\year\\abstokens\\1990.txt') as f: corp1990 = simplejson.load(f)
+minineutralcorpus = corp1911 + corp1950 + corp1970 + corp1980 + corp1990 #list addition to create the training corpus for LSA, in this case with hundreds of thousands of documents
+minineutralcorpusvectorize = [dictionary_abstracts.doc2bow(text) for text in minineutralcorpus]    #The gensim doc2bow method vectorizes the tokens from the tekenized documents. Make sure to use the same dictionary -- i.e. tokens to integers -- for all vectorizations!
+corpus = [dictionary_abstracts.doc2bow(text) for text in abstractdicttolist] #vectorizes the tokenized abstracts for each drug
+tfidf = models.TfidfModel(corpus) #train the gensim TF-IDF model using the corpus containing the drug abstracts, as this will help to differentiate the drug abstracts from each other and highlight unique terms. DO NOT do this TF-IDF on the disease query. 
+corpus_tfidf = tfidf[corpus]  #apply trained TF-IDF model back to the same corpus of drug abstracts to highlight the special, specific terms for each of them.
+vec_disease = dictionary_abstracts.doc2bow(filtered_disease) #vectorize the disease abstracts query
+lsi = models.LsiModel(minineutralcorpusvectorize, id2word=dictionary_abstracts, num_topics=208)  #train the gensim LSA model with the beutral pertinent corpora drawn from NLM NCBI abstracts scraped chronologically -- a neutral semantic space -- with minimum of 200 dimensions i.e. topics to help maximize comparison incorporating deep semantic structures
+disease_lsi = lsi[vec_disease] #transform the disease abstracts vector to LSA space
+index = similarities.MatrixSimilarity(lsi[corpus_tfidf])  #transform the TF-IDF-weighted vectorized drug abstracts to LSA space likewise
+sims = index[disease_lsi]  #cosine similarities for the disease query tells us which drug abstract collection it most resembles
+print(list(enumerate(sims)))
+simslist = list(enumerate(sims))
+simslabel = list(zip(druglist, simslist)) #more easily readable results output includes drug name alongside each cosine similarity value relative to the disease abstracts query as comparison
+print(simslabel)
